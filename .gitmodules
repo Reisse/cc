@@ -1,0 +1,6 @@
+[submodule "wiredtiger"]
+	path = wiredtiger
+	url = git@github.com:wiredtiger/wiredtiger.git
+[submodule "fmt"]
+	path = fmt
+	url = git@github.com:fmtlib/fmt.git
