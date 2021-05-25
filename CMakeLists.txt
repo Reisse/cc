@@ -3,7 +3,7 @@ project(cache_controller)
 
 set(CMAKE_CXX_STANDARD 17)
 
-add_executable(cache_controller main.cpp CacheController.cpp CacheController.h ICache.h IProbe.h ControllerConfig.cpp ControllerConfig.h WTCache.cpp WTCache.h WTCacheUsageProbe.cpp WTCacheUsageProbe.h Log.h)
+add_executable(cache_controller main.cpp CacheController.cpp CacheController.h ICache.h IProbe.h ControllerConfig.cpp ControllerConfig.h WTCache.cpp WTCache.h WTCacheUsageProbe.cpp WTCacheUsageProbe.h Log.h Statistics.h RDTSC.cpp RDTSC.h Statistics.cpp)
 
 set(DEPENDENCY_PATHS "wiredtiger/")
 

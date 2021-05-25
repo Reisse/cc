@@ -1,28 +1,24 @@
-#include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <direct.h>
-#include <sys/stat.h>
-#include <time.h>
+#include "CacheController.h"
+#include "Statistics.h"
+#include "WTCache.h"
+#include "WTCacheUsageProbe.h"
 
+#include "wiredtiger/wiredtiger.h"
+
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <vector>
 #include <chrono>
 #include <iostream>
+#include <fstream>
 #include <memory>
+#include <mutex>
+#include <queue>
+#include <filesystem>
+#include <random>
 
-#include "wiredtiger/wiredtiger.h"
-
-#include "CacheController.h"
-#include "WTCache.h"
-#include "WTCacheUsageProbe.h"
-
-#define NR_INDICES 16
-
-#define NR_THREADS 12
-#define NR_ITER 1000000
-
-#define WT_HOME "put_idx_crash.db"
+#define WT_HOME "benchmark.db"
 
 #define WT_CALL(call) \
     do { \
@@ -33,68 +29,97 @@
         } \
     } while (0)
 
-static uint64_t s_base;
-
-static uint64_t get_id()
-{
-    static uint64_t s_counter = 1;
-    return s_base | ++s_counter;
+std::string generate_key(uint64_t val) {
+    return "aaaadeadfood" + std::to_string(val);
 }
 
+size_t generate_payload(char * /* payload */, size_t max_payload_size) {
+    static thread_local std::random_device rd{};
+    static thread_local std::mt19937 gen{rd()};
 
-static void *
-thread_func(void *arg)
-{
-    WT_CONNECTION *conn;
-    WT_SESSION *session;
-    WT_CURSOR *cursor;
-    WT_ITEM v;
-    int i;
-    char payload[25];
+    std::normal_distribution<> d{(double) max_payload_size / 2, 1};
+    size_t generated_size = (uint64_t) d(gen);
+    if (generated_size == 0) { generated_size = 1; }
+    if (generated_size > max_payload_size) { generated_size = max_payload_size; }
+    return generated_size; // payload is irrelevant
+}
 
+void init_database(WT_CONNECTION * conn, uint64_t val_count) {
+    WT_SESSION * session;
+    WT_CALL(conn->open_session(conn, nullptr, nullptr, &session));
+
+    WT_CURSOR * cursor;
+    WT_CALL(session->open_cursor(session, "table:main", nullptr, nullptr, &cursor));
+
+    WT_ITEM k, v;
+    char payload[8096];
     v.data = payload;
-    v.size = sizeof(payload);
 
-    conn = (WT_CONNECTION *)arg;
-    WT_CALL(conn->open_session(conn, NULL, NULL, &session));
-
-    WT_CALL(session->open_cursor(session, "table:main", NULL, NULL, &cursor));
-
-    for (i = 0; i < NR_ITER; ++i) {
-        cursor->set_key(cursor, get_id());
-        cursor->set_value(cursor, &v,
-                          get_id(), get_id(), get_id(), get_id(), 3/*get_id()*/, get_id(), get_id(), get_id(),
-                          get_id(), get_id(), get_id(), get_id(), get_id(), get_id(), get_id(), get_id());
+    for (uint64_t i = 0; i < val_count; ++i) {
+        const std::string key = generate_key(i);
+        k.data = key.c_str();
+        k.size = key.size();
+        cursor->set_key(cursor, &k);
+        v.size = generate_payload(payload, sizeof(payload));
+        cursor->set_value(cursor, &v);
         WT_CALL(cursor->insert(cursor));
     }
 
-    WT_CALL(session->close(session, NULL));
-
-    return NULL;
+    WT_CALL(session->close(session, nullptr));
 }
 
-int main()
-{
-    WT_CONNECTION *conn;
-    WT_SESSION *session;
-    int i, rc;
-    char idx_name[16], idx_cfg[32];
+void do_test(WT_CONNECTION * conn, cc::Statistics & stats, uint64_t thr_num, uint64_t val_count, uint64_t iters) {
+    static thread_local std::random_device rd{};
+    static thread_local std::mt19937 gen{rd()};
+    std::uniform_int_distribution<uint64_t> dv{0, val_count - 1};
+    std::uniform_int_distribution<uint64_t> dp{0, 1};
 
-    _mkdir(WT_HOME);
+    WT_SESSION * session;
+    WT_CALL(conn->open_session(conn, nullptr, nullptr, &session));
 
-    s_base = ((uint64_t) time(NULL)) << 32;
+    WT_CURSOR * cursor;
+    WT_CALL(session->open_cursor(session, "table:main", nullptr, nullptr, &cursor));
 
-    WT_CALL(wiredtiger_open(WT_HOME, NULL, "create,cache_size=512M,checkpoint=(wait=30),eviction=(threads_max=1),statistics=(fast)", &conn));
-    //WT_CALL(wiredtiger_open(WT_HOME, NULL, "create,log=(enabled,file_max=10485760),checkpoint=(wait=30),eviction=(threads_max=1),transaction_sync=(enabled,method=none)", &conn));
-    WT_CALL(conn->open_session(conn, NULL, NULL, &session));
+    WT_ITEM k, v;
+    char payload[8096];
+    v.data = payload;
 
-    WT_CALL(session->create(session, "table:main", "key_format=Q,value_format=uQQQQQQQQQQQQQQQQ,columns=(k,v,i0,i1,i2,i3,i4,i5,i6,i7,i8,i9,i10,i11,i12,i13,i14,i15)"));  /* NR_INDICES */
-
-    for (i = 0; i < NR_INDICES; ++i) {
-        sprintf(idx_name, "index:main:%d", i);
-        sprintf(idx_cfg, "columns=(i%d)", i);
-        WT_CALL(session->create(session, idx_name, idx_cfg));
+    for (uint64_t i = 0; i < iters; ++i) {
+        const std::string key = generate_key(dv(gen));
+        k.data = key.c_str();
+        k.size = key.size();
+        cursor->set_key(cursor, &k);
+        if (dp(gen)) {
+            v.size = generate_payload(payload, sizeof(payload));
+            cursor->set_value(cursor, &v);
+            stats.thread_in(thr_num, "put");
+            WT_CALL(cursor->insert(cursor));
+        } else {
+            stats.thread_in(thr_num, "get");
+            WT_CALL(cursor->search(cursor));
+            WT_CALL(cursor->get_value(cursor, &v));
+        }
+        stats.thread_out(thr_num);
     }
+
+    WT_CALL(session->close(session, nullptr));
+}
+
+/* void memory_logger(std::filesystem::path memory_csv)
+{
+    std::ofstream stats_file{stats_filename, std::ofstream::out | std::ofstream::app};
+    stats_file <<
+} */
+
+int main() {
+    void * dummy = malloc(410ULL * 1024 * 1024);
+
+    WT_CONNECTION * conn;
+    WT_SESSION * session;
+
+    WT_CALL(wiredtiger_open(WT_HOME, nullptr, "create,cache_size=512M,checkpoint=(wait=30),eviction=(threads_max=1),statistics=(fast)", &conn));
+    WT_CALL(conn->open_session(conn, nullptr, nullptr, &session));
+    WT_CALL(session->create(session, "table:main", ""));
 
     // controller
     /* std::unique_ptr<cc::ICache> cache = std::make_unique<cc::WTCache>(conn, 512ULL*1024ULL*1024ULL);
@@ -103,21 +128,70 @@ int main()
     cc::CacheController cacheController{std::move(cache), std::move(probes), cc::ControllerConfig{}}; */
     // controller
 
-    auto t1 = std::chrono::system_clock::now();
+    std::queue<std::function<void()>> block_queue;
+    std::mutex block_queue_mutex;
+    std::condition_variable block_queue_cond;
+    bool done = false;
 
-    std::vector<std::thread> thrs;
-    for (i = 0; i < NR_THREADS; ++i) {
-        thrs.emplace_back([&conn] { thread_func(conn); });
+    std::filesystem::path stats_filename = "stats.csv";
+
+    uint64_t threads = 4;
+    cc::Statistics stats{threads, threads * 1 * 1024 * 1024, [&] (size_t thread_id, std::unique_ptr<cc::Statistics::ThreadStats> thread_stats) {
+        std::unique_lock<std::mutex> lock(block_queue_mutex);
+        block_queue.push([&, thread_id, thread_stats = thread_stats.release()] {
+            std::ofstream stats_file{stats_filename, std::ofstream::out | std::ofstream::app};
+            for (const auto & stat_entry : *thread_stats) {
+                stats_file << thread_id << ','
+                           << cc::TSC_to_usec(stat_entry.get_rdtsc()) << ','
+                           << stat_entry.get_action() << '\n';
+            }
+            delete thread_stats; // std::function doesn't allow for unique_ptr inside
+        });
+        block_queue_cond.notify_one();
+    }};
+    stats.enable();
+
+    std::thread stats_consumer{[&] {
+        std::unique_lock<std::mutex> lock(block_queue_mutex);
+        while (!done) {
+            while (block_queue.empty()) {
+                block_queue_cond.wait(lock);
+            }
+
+            while (!block_queue.empty()) {
+                block_queue.front()();
+                block_queue.pop();
+            }
+        }
+    }};
+
+    uint64_t val_count = 2'250'000;
+    init_database(conn, val_count);
+
+    uint64_t iters = 10'000'000;
+    std::vector<std::thread> workers;
+    for (uint64_t i = 0; i < threads; ++i) {
+        workers.emplace_back([&stats, i, conn, val_count, iters] {
+            do_test(conn, stats, i, val_count, iters);
+        });
+    }
+    for (auto & worker : workers) {
+        worker.join();
     }
 
-    for (auto & thr : thrs) {
-        thr.join();
+    WT_CALL(conn->close(conn, nullptr));
+
+    stats.disable();
+    for (size_t i = 0; i < threads; ++i) { // force dump stats
+        stats.thread_in(i, "dump");
     }
 
-    auto t2 = std::chrono::system_clock::now();
-    std::cout << std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count() << std::endl;
+    std::unique_lock<std::mutex> lock(block_queue_mutex);
+    done = true;
+    block_queue_cond.notify_one();
+    stats_consumer.join();
 
-    WT_CALL(conn->close(conn, NULL));
+    free(dummy);
 
     return 0;
 }
