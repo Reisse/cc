@@ -17,6 +17,7 @@
 #include <queue>
 #include <filesystem>
 #include <random>
+#include <future>
 
 #define WT_HOME "benchmark.db"
 
@@ -105,11 +106,33 @@ void do_test(WT_CONNECTION * conn, cc::Statistics & stats, uint64_t thr_num, uin
     WT_CALL(session->close(session, nullptr));
 }
 
-/* void memory_logger(std::filesystem::path memory_csv)
+void cache_logger(std::filesystem::path memory_csv, std::future<void> stop_signal, WT_SESSION * session)
 {
-    std::ofstream stats_file{stats_filename, std::ofstream::out | std::ofstream::app};
-    stats_file <<
-} */
+    auto probe = std::make_unique<cc::WTCacheUsageProbe>(session);
+    std::ofstream stats_file{memory_csv, std::ofstream::out | std::ofstream::app};
+    while (stop_signal.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+        stats_file << probe->get_bytes() << std::endl;
+    }
+}
+
+void memory_hog()
+{
+    size_t ints_sz = 450ULL * 1000 * 1000;
+    int * ints = new int[ints_sz];
+    for (size_t i = 0; i < ints_sz; ++i) {
+        ints[i] = i;
+    }
+
+    std::random_device rd{};
+    std::mt19937 gen{rd()};
+    std::uniform_int_distribution<uint64_t> dv{0, ints_sz - 1};
+
+    // poke pages
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ints[dv(gen)] = dv(gen);
+    }
+}
 
 int main() {
     void * dummy = malloc(410ULL * 1024 * 1024);
@@ -117,16 +140,9 @@ int main() {
     WT_CONNECTION * conn;
     WT_SESSION * session;
 
-    WT_CALL(wiredtiger_open(WT_HOME, nullptr, "create,cache_size=512M,checkpoint=(wait=30),eviction=(threads_max=1),statistics=(fast)", &conn));
+    WT_CALL(wiredtiger_open(WT_HOME, nullptr, "create,cache_size=1536M,checkpoint=(wait=30),eviction=(threads_max=1),statistics=(fast)", &conn));
     WT_CALL(conn->open_session(conn, nullptr, nullptr, &session));
     WT_CALL(session->create(session, "table:main", ""));
-
-    // controller
-    /* std::unique_ptr<cc::ICache> cache = std::make_unique<cc::WTCache>(conn, 512ULL*1024ULL*1024ULL);
-    std::vector<std::unique_ptr<cc::IProbe>> probes;
-    probes.emplace_back(std::make_unique<cc::WTCacheUsageProbe>(session));
-    cc::CacheController cacheController{std::move(cache), std::move(probes), cc::ControllerConfig{}}; */
-    // controller
 
     std::queue<std::function<void()>> block_queue;
     std::mutex block_queue_mutex;
@@ -165,10 +181,25 @@ int main() {
         }
     }};
 
-    uint64_t val_count = 2'250'000;
+    uint64_t val_count = 1'500'000;
     init_database(conn, val_count);
 
-    uint64_t iters = 10'000'000;
+    // controller
+    /* std::unique_ptr<cc::ICache> cache = std::make_unique<cc::WTCache>(conn, 512ULL*1024ULL*1024ULL);
+    std::vector<std::unique_ptr<cc::IProbe>> probes;
+    probes.emplace_back(std::make_unique<cc::WTCacheUsageProbe>(session));
+    cc::CacheController cacheController{std::move(cache), std::move(probes), cc::ControllerConfig{}}; */
+    // controller
+
+    std::promise<void> mem_stop_signal;
+    std::thread memory_logger{[&] {
+        cache_logger("cache.csv", mem_stop_signal.get_future(), session);
+    }};
+
+    std::thread mhog(memory_hog);
+    mhog.detach();
+
+    uint64_t iters = 500'000;
     std::vector<std::thread> workers;
     for (uint64_t i = 0; i < threads; ++i) {
         workers.emplace_back([&stats, i, conn, val_count, iters] {
@@ -179,17 +210,22 @@ int main() {
         worker.join();
     }
 
-    WT_CALL(conn->close(conn, nullptr));
+    mem_stop_signal.set_value();
+    memory_logger.join();
 
     stats.disable();
     for (size_t i = 0; i < threads; ++i) { // force dump stats
         stats.thread_in(i, "dump");
     }
 
-    std::unique_lock<std::mutex> lock(block_queue_mutex);
-    done = true;
+    {
+        std::unique_lock<std::mutex> lock(block_queue_mutex);
+        done = true;
+    }
     block_queue_cond.notify_one();
     stats_consumer.join();
+
+    WT_CALL(conn->close(conn, nullptr));
 
     free(dummy);
 

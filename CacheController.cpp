@@ -38,6 +38,7 @@ void CacheController::thread_fun() {
                 probe_delta = probe_value - it->second;
                 it->second = probe_value;
             } else {
+                probe_delta = 0;
                 probe_values.emplace(probe_name, probe_value);
             }
 
@@ -52,6 +53,9 @@ void CacheController::thread_fun() {
 
         if (auto aggr_cache_delta = m_config.aggregate_cache_deltas(cache_deltas)) {
             size_t new_cache_size = cache_size + *aggr_cache_delta;
+            if (new_cache_size > 1500ULL * 1024 * 1024) {
+                new_cache_size = 1500ULL * 1024 * 1024;
+            }
             m_cache->set_cache_size(new_cache_size);
             log(LogLevel::Debug, fmt::format("New cache size aggregated from deltas: {}", new_cache_size));
         } else {

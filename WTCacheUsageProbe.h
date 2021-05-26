@@ -13,6 +13,8 @@ public:
     std::string_view get_name() const override;
     int64_t get_value() const override;
 
+    int64_t get_bytes() const;
+
 private:
     WT_SESSION * m_wt_sess = nullptr;
 };

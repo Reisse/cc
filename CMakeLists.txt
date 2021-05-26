@@ -10,6 +10,10 @@ set(DEPENDENCY_PATHS "wiredtiger/")
 find_library(WIREDTIGER NAMES wiredtiger HINTS ${DEPENDENCY_PATHS})
 target_link_libraries(cache_controller ${WIREDTIGER})
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(cache_controller Threads::Threads)
+
 add_subdirectory(fmt)
 
 find_package(fmt)

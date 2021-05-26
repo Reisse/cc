@@ -45,4 +45,14 @@ int64_t WTCacheUsageProbe::get_value() const
     return cache_use * 1000 / cache_size;
 }
 
+int64_t WTCacheUsageProbe::get_bytes() const
+{
+    WT_CURSOR * cursor;
+    error_check(
+            m_wt_sess->open_cursor(m_wt_sess, "statistics:", nullptr, nullptr, &cursor),
+            "Failed to open cursor");
+    int64_t cache_use = get_stat(cursor, WT_STAT_CONN_CACHE_BYTES_INUSE);
+    return cache_use;
+}
+
 } // namespace cc
